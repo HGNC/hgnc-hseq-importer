@@ -98,11 +98,23 @@ class HseqImportService(Service):
         self._repository = repository
         self._logger = logger
 
+    def run(self) -> None:
+        """Execute the hseq import lifecycle (Service ABC contract).
+
+        Delegates to ``run_import()``. Results are logged rather than
+        returned, matching the batch-job entrypoint pattern.
+        """
+        self.run_import()
+
     def run_import(self) -> ImportResult:
         """Execute the full hseq import lifecycle.
 
+        Queries all four sources in priority order, applies the
+        coordinator to select one candidate per gene, batch-inserts
+        Hseq records, and updates HGNC gene pointers.
+
         Returns:
-            An ImportResult with counts of upserted and updated records.
+            An ImportResult with counts of inserted and updated records.
 
         Raises:
             PersistenceError: If database operations fail.
@@ -114,7 +126,24 @@ class HseqImportService(Service):
 
         start = time.monotonic()
         try:
-            result = ImportResult()
+            coordinator = HseqImportCoordinator(logger=self._logger)
+
+            all_candidates: list[HseqCandidate] = []
+            all_candidates.extend(self._repository.get_pseudogene_candidates())
+            all_candidates.extend(self._repository.get_vega_candidates())
+            all_candidates.extend(self._repository.get_ccds_candidates())
+            all_candidates.extend(self._repository.get_ensembl_candidates())
+
+            selected = coordinator.select_candidates(all_candidates)
+
+            inserted = 0
+            if selected:
+                inserted = self._repository.batch_insert_hseq(selected)
+
+            result = ImportResult(
+                records_parsed=len(all_candidates),
+                sequences_upserted=inserted,
+            )
         finally:
             elapsed = time.monotonic() - start
 
@@ -122,6 +151,8 @@ class HseqImportService(Service):
             "import_complete",
             extra={
                 "event": "import_complete",
+                "records_parsed": result.records_parsed,
+                "sequences_upserted": result.sequences_upserted,
                 "duration_seconds": round(elapsed, 3),
             },
         )

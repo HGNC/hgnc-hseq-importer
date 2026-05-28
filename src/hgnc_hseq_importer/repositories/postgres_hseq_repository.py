@@ -84,7 +84,7 @@ class PostgresHseqRepository(HseqRepository):
                 .where(orm.Gene.pseudogene_id.is_(None))
                 .where(orm.Gene.hseq_ids.is_(None))
                 .where(orm.Gene.lock.is_(None))
-                .where(orm.Gene.pub_refseq_ids.is_(None))
+                .where(orm.Gene.public_refseq_ids.is_(None))
                 .order_by(orm.OtterSequence.length.desc())
             )
             rows = self._ro.execute(stmt).all()
@@ -125,7 +125,7 @@ class PostgresHseqRepository(HseqRepository):
                 .join(orm.Ccds, first_ccds == orm.Ccds.ccds_id)
                 .join(orm.CcdsSequence, orm.Ccds.ccds_id == orm.CcdsSequence.ccdseq_ccds_id)
                 .where(orm.Gene.hseq_ids.is_(None))
-                .where(orm.Gene.pub_refseq_ids.is_(None))
+                .where(orm.Gene.public_refseq_ids.is_(None))
             )
             rows = self._ro.execute(stmt).all()
             return [
@@ -153,9 +153,9 @@ class PostgresHseqRepository(HseqRepository):
                     orm.EnsemblSequence.sequence,
                 )
                 .select_from(orm.Gene, orm.EnsemblSequence)
-                .where(orm.Gene.pub_ensembl_id == orm.EnsemblSequence.eseq_ensembl_gene_id)
+                .where(orm.Gene.public_ensembl_id == orm.EnsemblSequence.eseq_ensembl_gene_id)
                 .where(orm.Gene.hseq_ids.is_(None))
-                .where(orm.Gene.pub_refseq_ids.is_(None))
+                .where(orm.Gene.public_refseq_ids.is_(None))
                 .order_by(
                     orm.EnsemblSequence.length.desc(),
                     orm.EnsemblSequence.eseq_ensembl_gene_id,
