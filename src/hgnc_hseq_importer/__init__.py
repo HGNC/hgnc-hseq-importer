@@ -1,0 +1,1 @@
+"""HGNC HSEQ importer service."""
