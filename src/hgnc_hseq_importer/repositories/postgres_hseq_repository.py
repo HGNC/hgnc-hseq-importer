@@ -1,128 +1,214 @@
 """Postgres repository for hseq and HGNC pointer operations.
 
-Implements the HseqRepository ABC using psycopg v3 with parameterized
-SQL for all operations.
+Implements the HseqRepository ABC using genew4-orm SQLAlchemy sessions
+for source queries and psycopg v3 for the Hseq insert / Gene update
+lifecycle.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
+from genew4_orm import models as orm
+from sqlalchemy import select, func
+
+from hgnc_hseq_importer.models import HseqCandidate
 from hgnc_hseq_importer.exceptions import PersistenceError
-from hgnc_hseq_importer.models import HgncGene, HseqRecord
 from hgnc_hseq_importer.repositories.hseq_repository import HseqRepository
 
-logger = logging.getLogger(__name__)
-
-_SELECT_SEQUENCES_FOR_GENE = (
-    "SELECT hgnc_id, source, sequence_type, sequence, accession, version "
-    "FROM hseq WHERE hgnc_id = %s"
-)
-
-_UPSERT_SEQUENCE = (
-    "INSERT INTO hseq (hgnc_id, source, sequence_type, sequence, accession, version) "
-    "VALUES (%s, %s, %s, %s, %s, %s) "
-    "ON CONFLICT (hgnc_id, source, sequence_type, accession) DO UPDATE SET "
-    "sequence = EXCLUDED.sequence, "
-    "version = EXCLUDED.version"
-)
-
-_SELECT_GENES_WITH_SEQUENCES = (
-    "SELECT g.hgnc_id, g.symbol, "
-    "g.peptide_ensembl_id, g.peptide_refseq_id "
-    "FROM hgnc g WHERE EXISTS ("
-    "  SELECT 1 FROM hseq s WHERE s.hgnc_id = g.hgnc_id"
-    ")"
-)
-
-_UPDATE_HGNC_POINTERS = (
-    "UPDATE hgnc SET "
-    "peptide_ensembl_id = %s, "
-    "peptide_refseq_id = %s "
-    "WHERE hgnc_id = %s"
-)
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 class PostgresHseqRepository(HseqRepository):
     """Concrete Postgres repository for hseq sequence storage.
 
-    Uses psycopg v3 with parameterized SQL. Maps database errors
-    to PersistenceError for service-layer consumption.
+    Uses genew4-orm SQLAlchemy sessions for queries. Maps database
+    errors to PersistenceError for service-layer consumption.
 
     Args:
-        connection: A psycopg v3 connection instance.
+        readonly_session: A SQLAlchemy Session for read queries.
+        readwrite_session: A SQLAlchemy Session for writes.
     """
 
-    def __init__(self, connection: Any) -> None:
-        self._conn = connection
+    def __init__(
+        self,
+        readonly_session: Session,
+        readwrite_session: Session,
+    ) -> None:
+        self._ro = readonly_session
+        self._rw = readwrite_session
 
-    def get_sequences_for_gene(self, hgnc_id: str) -> list[HseqRecord]:
+    def get_pseudogene_candidates(self) -> list[HseqCandidate]:
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(_SELECT_SEQUENCES_FOR_GENE, (hgnc_id,))
-                return [
-                    HseqRecord(
-                        hgnc_id=row[0],
-                        source=row[1],
-                        sequence_type=row[2],
-                        sequence=row[3],
-                        accession=row[4],
-                        version=row[5],
-                    )
-                    for row in cur.fetchall()
-                ]
+            stmt = (
+                select(
+                    orm.Gene.hgnc_id,
+                    orm.Gene.approved_symbol,
+                    orm.Gene.pseudogene_id,
+                    orm.PseudogeneOrg.sequence,
+                    orm.PseudogeneOrg.chromosome,
+                )
+                .select_from(orm.Gene, orm.PseudogeneOrg)
+                .where(orm.Gene.pseudogene_id == orm.PseudogeneOrg.porg_id)
+                .where(orm.Gene.hseq_ids.is_(None))
+                .where(orm.Gene.lock.is_(None))
+            )
+            rows = self._ro.execute(stmt).all()
+            return [
+                HseqCandidate(
+                    hgnc_id=row[0],
+                    source="pseudo",
+                    defline=f"{row[1]} | {row[2]} | C:{row[4]} | HGNC:{row[0]}",
+                    sequence=row[3] or "",
+                )
+                for row in rows
+            ]
         except Exception as exc:
             raise PersistenceError(
-                f"Failed to query hseq for gene {hgnc_id!r}: {exc}"
+                f"Failed to query pseudogene candidates: {exc}"
             ) from exc
 
-    def upsert_sequences(self, records: list[HseqRecord]) -> int:
-        if not records:
+    def get_vega_candidates(self) -> list[HseqCandidate]:
+        try:
+            stmt = (
+                select(
+                    orm.Gene.hgnc_id,
+                    orm.OtterSequence.oseq_gene_id,
+                    orm.OtterSequence.defline,
+                    orm.OtterSequence.sequence,
+                )
+                .select_from(orm.Gene, orm.OtterSequence)
+                .where(orm.Gene.vega_ids == orm.OtterSequence.oseq_gene_id)
+                .where(orm.Gene.pseudogene_id.is_(None))
+                .where(orm.Gene.hseq_ids.is_(None))
+                .where(orm.Gene.lock.is_(None))
+                .where(orm.Gene.pub_refseq_ids.is_(None))
+                .order_by(orm.OtterSequence.length.desc())
+            )
+            rows = self._ro.execute(stmt).all()
+            seen_gene_ids: set[str] = set()
+            candidates: list[HseqCandidate] = []
+            for row in rows:
+                gene_id = row[1]
+                if gene_id in seen_gene_ids:
+                    continue
+                seen_gene_ids.add(gene_id)
+                candidates.append(
+                    HseqCandidate(
+                        hgnc_id=row[0],
+                        source="vega",
+                        defline=f"{row[2]} | HGNC:{row[0]}",
+                        sequence=row[3] or "",
+                    )
+                )
+            return candidates
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to query VEGA candidates: {exc}"
+            ) from exc
+
+    def get_ccds_candidates(self) -> list[HseqCandidate]:
+        try:
+            first_ccds = func.split_part(orm.Gene.ccds_ids, ",", 1)
+            stmt = (
+                select(
+                    orm.Gene.hgnc_id,
+                    orm.Ccds.ccds_id,
+                    orm.Ccds.chromosome,
+                    orm.Ccds.ncbi_gene_id,
+                    orm.Gene.approved_symbol,
+                    orm.CcdsSequence.sequence,
+                )
+                .select_from(orm.Gene)
+                .join(orm.Ccds, first_ccds == orm.Ccds.ccds_id)
+                .join(orm.CcdsSequence, orm.Ccds.ccds_id == orm.CcdsSequence.ccdseq_ccds_id)
+                .where(orm.Gene.hseq_ids.is_(None))
+                .where(orm.Gene.pub_refseq_ids.is_(None))
+            )
+            rows = self._ro.execute(stmt).all()
+            return [
+                HseqCandidate(
+                    hgnc_id=row[0],
+                    source="ccds",
+                    defline=(
+                        f"{row[1]} | C:{row[2]} | EG:{row[3]} | {row[4]} | HGNC:{row[0]}"
+                    ),
+                    sequence=row[5] or "",
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to query CCDS candidates: {exc}"
+            ) from exc
+
+    def get_ensembl_candidates(self) -> list[HseqCandidate]:
+        try:
+            stmt = (
+                select(
+                    orm.Gene.hgnc_id,
+                    orm.EnsemblSequence.defline,
+                    orm.EnsemblSequence.sequence,
+                )
+                .select_from(orm.Gene, orm.EnsemblSequence)
+                .where(orm.Gene.pub_ensembl_id == orm.EnsemblSequence.eseq_ensembl_gene_id)
+                .where(orm.Gene.hseq_ids.is_(None))
+                .where(orm.Gene.pub_refseq_ids.is_(None))
+                .order_by(
+                    orm.EnsemblSequence.length.desc(),
+                    orm.EnsemblSequence.eseq_ensembl_gene_id,
+                )
+            )
+            rows = self._ro.execute(stmt).all()
+            return [
+                HseqCandidate(
+                    hgnc_id=row[0],
+                    source="ensembl",
+                    defline=f"{row[1]} | HGNC:{row[0]}",
+                    sequence=row[2] or "",
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to query Ensembl candidates: {exc}"
+            ) from exc
+
+    def batch_insert_hseq(self, candidates: list[HseqCandidate]) -> int:
+        if not candidates:
             return 0
         try:
-            params = [
-                (r.hgnc_id, r.source, r.sequence_type, r.sequence, r.accession, r.version)
-                for r in records
+            records = [
+                orm.Hseq(
+                    ext=c.source,
+                    editor="genew",
+                    molecule="dna",
+                    submitted=int(__import__("time").time()),
+                    status="done",
+                    priority=100,
+                    run_notes="search=hgnc_heavy, summ=50, align=30",
+                    comment="import via hseqs_importer",
+                    entry_class="archive",
+                    is_new="TRUE",
+                    defline=c.defline,
+                    sequence=c.sequence,
+                )
+                for c in candidates
             ]
-            with self._conn.cursor() as cur:
-                cur.executemany(_UPSERT_SEQUENCE, params)
-                return cur.rowcount
+            self._rw.add_all(records)
+            self._rw.flush()
+            return len(records)
         except Exception as exc:
             raise PersistenceError(
-                f"Failed to upsert {len(records)} hseq records: {exc}"
+                f"Failed to batch insert {len(candidates)} hseq records: {exc}"
             ) from exc
 
-    def get_hgnc_genes_with_sequences(self) -> list[HgncGene]:
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(_SELECT_GENES_WITH_SEQUENCES)
-                return [
-                    HgncGene(
-                        hgnc_id=row[0],
-                        symbol=row[1],
-                        peptide_ensembl_id=row[2],
-                        peptide_refseq_id=row[3],
-                    )
-                    for row in cur.fetchall()
-                ]
-        except Exception as exc:
-            raise PersistenceError(
-                f"Failed to query HGNC genes with sequences: {exc}"
-            ) from exc
-
-    def update_hgnc_pointers(self, genes: list[HgncGene]) -> int:
-        if not genes:
-            return 0
-        try:
-            params = [
-                (g.peptide_ensembl_id, g.peptide_refseq_id, g.hgnc_id)
-                for g in genes
-            ]
-            with self._conn.cursor() as cur:
-                cur.executemany(_UPDATE_HGNC_POINTERS, params)
-                return cur.rowcount
-        except Exception as exc:
-            raise PersistenceError(
-                f"Failed to update HGNC pointers for {len(genes)} genes: {exc}"
-            ) from exc
+    def update_hgnc_hseq_pointers(
+        self,
+        run_comment: str,
+        run_submitted: int,
+        editor: str,
+    ) -> int:
+        raise NotImplementedError("TODO: implement with Genew4Lock")

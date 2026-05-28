@@ -1,15 +1,14 @@
 """Abstract repository interface for hseq and HGNC pointer operations.
 
-Defines the contract that concrete Postgres repository implementations
-must fulfil for reading/writing sequence records and updating HGNC
-sequence pointer columns.
+Defines the contract that concrete repository implementations must
+fulfil for querying source data and persisting Hseq records.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from hgnc_hseq_importer.models import HgncGene, HseqRecord
+from hgnc_hseq_importer.models import HseqCandidate
 
 
 class HseqRepository(ABC):
@@ -20,42 +19,66 @@ class HseqRepository(ABC):
     """
 
     @abstractmethod
-    def get_sequences_for_gene(self, hgnc_id: str) -> list[HseqRecord]:
-        """Return all hseq records for the given gene.
-
-        Args:
-            hgnc_id: The HGNC identifier.
+    def get_pseudogene_candidates(self) -> list[HseqCandidate]:
+        """Return Pseudogene source candidates.
 
         Returns:
-            A list of HseqRecord instances.
+            A list of HseqCandidate instances from pseudogene_org.
         """
 
     @abstractmethod
-    def upsert_sequences(self, records: list[HseqRecord]) -> int:
-        """Insert or update hseq records.
-
-        Args:
-            records: The sequence records to upsert.
+    def get_vega_candidates(self) -> list[HseqCandidate]:
+        """Return VEGA source candidates.
 
         Returns:
-            The number of rows affected.
+            A list of HseqCandidate instances from otter_seq.
         """
 
     @abstractmethod
-    def get_hgnc_genes_with_sequences(self) -> list[HgncGene]:
-        """Return all HGNC genes that have at least one sequence.
+    def get_ccds_candidates(self) -> list[HseqCandidate]:
+        """Return CCDS source candidates.
 
         Returns:
-            A list of HgncGene instances with current pointer values.
+            A list of HseqCandidate instances from ccds + ccds_seq.
         """
 
     @abstractmethod
-    def update_hgnc_pointers(self, genes: list[HgncGene]) -> int:
-        """Update HGNC sequence pointer columns for the given genes.
-
-        Args:
-            genes: Genes with updated pointer values to persist.
+    def get_ensembl_candidates(self) -> list[HseqCandidate]:
+        """Return Ensembl source candidates.
 
         Returns:
-            The number of rows updated.
+            A list of HseqCandidate instances from ensembl_seq.
+        """
+
+    @abstractmethod
+    def batch_insert_hseq(self, candidates: list[HseqCandidate]) -> int:
+        """Insert Hseq records for the given candidates.
+
+        Args:
+            candidates: The candidate records to persist.
+
+        Returns:
+            The number of rows inserted.
+        """
+
+    @abstractmethod
+    def update_hgnc_hseq_pointers(
+        self,
+        run_comment: str,
+        run_submitted: int,
+        editor: str,
+    ) -> int:
+        """Update Gene.hseq_ids and Gene.pub_hseq_id for newly inserted Hseq rows.
+
+        Finds new hseq rows matching the run metadata, parses hgnc_id
+        from the defline, and updates the corresponding Gene records
+        using Genew4Lock for safe concurrent access.
+
+        Args:
+            run_comment: The comment used to identify this run's hseq rows.
+            run_submitted: The submitted timestamp for this run.
+            editor: The editor name for lock acquisition.
+
+        Returns:
+            The number of Gene records updated.
         """

@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from hgnc_hseq_importer.models import HseqCandidate
 from hgnc_hseq_importer.services.hseq_import_service import (
-    HseqCandidate,
     HseqImportCoordinator,
 )
 

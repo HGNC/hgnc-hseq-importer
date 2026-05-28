@@ -11,25 +11,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from hgnc_hseq_importer.models import HseqCandidate
 from hgnc_hseq_importer.repositories.hseq_repository import HseqRepository
 from hgnc_hseq_importer.services.base_service import Service
-
-
-@dataclass
-class HseqCandidate:
-    """A candidate Hseq record from a source query.
-
-    Attributes:
-        hgnc_id: The HGNC identifier for the gene.
-        source: The source name (pseudo, vega, ccds, ensembl).
-        defline: The FASTA defline string.
-        sequence: The nucleotide sequence.
-    """
-
-    hgnc_id: int
-    source: str
-    defline: str
-    sequence: str
 
 
 @dataclass
