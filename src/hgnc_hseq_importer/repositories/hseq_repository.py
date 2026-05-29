@@ -67,6 +67,7 @@ class HseqRepository(ABC):
         run_comment: str,
         run_submitted: int,
         editor: str,
+        genew4_lock: object | None = None,
     ) -> int:
         """Update Gene.hseq_ids and Gene.pub_hseq_id for newly inserted Hseq rows.
 
@@ -78,6 +79,7 @@ class HseqRepository(ABC):
             run_comment: The comment used to identify this run's hseq rows.
             run_submitted: The submitted timestamp for this run.
             editor: The editor name for lock acquisition.
+            genew4_lock: A Genew4Lock instance for row-level locking.
 
         Returns:
             The number of Gene records updated.

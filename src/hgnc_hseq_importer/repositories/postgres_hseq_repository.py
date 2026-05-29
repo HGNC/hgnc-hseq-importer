@@ -11,7 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from genew4_orm import models as orm
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text, update
 
 from hgnc_hseq_importer.models import HseqCandidate
 from hgnc_hseq_importer.exceptions import PersistenceError
@@ -211,5 +211,60 @@ class PostgresHseqRepository(HseqRepository):
         run_comment: str,
         run_submitted: int,
         editor: str,
+        genew4_lock: object | None = None,
     ) -> int:
-        raise NotImplementedError("TODO: implement with Genew4Lock")
+        try:
+            find_stmt = text("""
+                SELECT hgnc.hgnc_id, hgnc.hgnc_app_sym,
+                       hseq.hseq_ext || '_' || hseq.hseq_id AS full_hseq_id
+                FROM   hseq, hgnc
+                WHERE  hgnc.hgnc_id = CAST(split_part(hseq.hseq_defline, ' | HGNC:', 2) AS int)
+                AND    hseq.hseq_comment = :comment
+                AND    hseq.hseq_submitted = :submitted
+                AND    hgnc.hgnc_hseq_ids IS NULL
+            """)
+            rows = self._ro.execute(
+                find_stmt,
+                {"comment": run_comment, "submitted": run_submitted},
+            ).all()
+
+            if not rows or genew4_lock is None:
+                return 0
+
+            updated = 0
+            lock_code = genew4_lock.lock_code
+            for row in rows:
+                hgnc_id = row[0]
+                full_hseq_id = row[2]
+
+                genew4_lock.lock_row(hgnc_id)
+
+                memo_expr = (
+                    "COALESCE(hgnc_edit_memo, '') "
+                    "|| E'\\nHSeq " + full_hseq_id + " sequence mapped in by hseqs_importer'"
+                )
+                update_stmt = (
+                    update(orm.Gene)
+                    .where(
+                        orm.Gene.lock == lock_code,
+                        orm.Gene.hgnc_id == hgnc_id,
+                        orm.Gene.hseq_ids.is_(None),
+                    )
+                    .values(
+                        hseq_ids=full_hseq_id,
+                        public_hseq_id=full_hseq_id,
+                        edit_memo=text(memo_expr),
+                    )
+                )
+                result = self._rw.execute(update_stmt)
+                updated += result.rowcount
+
+            self._rw.flush()
+            return updated
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to update_hgnc_hseq_pointers: {exc}"
+            ) from exc
+        finally:
+            if genew4_lock is not None:
+                genew4_lock.unlock_all()

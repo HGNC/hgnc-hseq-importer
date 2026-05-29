@@ -459,19 +459,131 @@ class TestBatchInsertHseq:
 
 
 class TestUpdateHgncHseqPointers:
-    """Test update_hgnc_hseq_pointers (currently NotImplementedError)."""
+    """Test update_hgnc_hseq_pointers implementation."""
 
-    def test_raises_not_implemented(self) -> None:
+    def test_returns_zero_when_no_matching_hseq_rows(self) -> None:
         mock_ro = MagicMock()
         mock_rw = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_ro.execute.return_value = mock_result
+
+        mock_lock_repo = MagicMock()
+        mock_lock = MagicMock()
+
+        repo = PostgresHseqRepository(
+            readonly_session=mock_ro, readwrite_session=mock_rw
+        )
+        count = repo.update_hgnc_hseq_pointers(
+            run_comment="import via hseqs_importer",
+            run_submitted=1234567890,
+            editor="genew",
+            genew4_lock=mock_lock,
+        )
+
+        assert count == 0
+        mock_lock.lock_row.assert_not_called()
+
+    def test_locks_and_updates_genes_for_matching_hseq_rows(self) -> None:
+        mock_ro = MagicMock()
+        mock_rw = MagicMock()
+
+        mock_find_result = MagicMock()
+        mock_find_result.all.return_value = [
+            (1, "BRCA1", "pseudo_101"),
+            (2, "TP53", "vega_202"),
+        ]
+        mock_update_result = MagicMock()
+        mock_update_result.rowcount = 1
+
+        call_count = 0
+
+        def execute_side_effect(stmt, *args):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return mock_find_result
+            return mock_update_result
+
+        mock_ro.execute.side_effect = execute_side_effect
+        mock_rw.execute.side_effect = execute_side_effect
+
+        mock_lock = MagicMock()
+        mock_lock.lock_code = "genew:_:testhost:_:123:_:1"
+        mock_lock.lock_row.return_value = 1
+
+        repo = PostgresHseqRepository(
+            readonly_session=mock_ro, readwrite_session=mock_rw
+        )
+        count = repo.update_hgnc_hseq_pointers(
+            run_comment="import via hseqs_importer",
+            run_submitted=1234567890,
+            editor="genew",
+            genew4_lock=mock_lock,
+        )
+
+        assert count == 2
+        assert mock_lock.lock_row.call_count == 2
+        mock_lock.unlock_all.assert_called_once()
+
+    def test_unlocks_all_on_completion(self) -> None:
+        mock_ro = MagicMock()
+        mock_rw = MagicMock()
+
+        mock_find_result = MagicMock()
+        mock_find_result.all.return_value = [
+            (1, "SYM", "ccds_303"),
+        ]
+        mock_update_result = MagicMock()
+        mock_update_result.rowcount = 1
+
+        call_count = 0
+
+        def execute_side_effect(stmt, *args):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return mock_find_result
+            return mock_update_result
+
+        mock_ro.execute.side_effect = execute_side_effect
+        mock_rw.execute.side_effect = execute_side_effect
+
+        mock_lock = MagicMock()
+        mock_lock.lock_code = "genew:_:testhost:_:123:_:1"
+        mock_lock.lock_row.return_value = 1
+
+        repo = PostgresHseqRepository(
+            readonly_session=mock_ro, readwrite_session=mock_rw
+        )
+        repo.update_hgnc_hseq_pointers(
+            run_comment="import via hseqs_importer",
+            run_submitted=1234567890,
+            editor="genew",
+            genew4_lock=mock_lock,
+        )
+
+        mock_lock.unlock_all.assert_called_once()
+
+    def test_unlocks_all_even_on_error(self) -> None:
+        from hgnc_hseq_importer.exceptions import PersistenceError
+
+        mock_ro = MagicMock()
+        mock_rw = MagicMock()
+        mock_ro.execute.side_effect = RuntimeError("db connection lost")
+
+        mock_lock = MagicMock()
 
         repo = PostgresHseqRepository(
             readonly_session=mock_ro, readwrite_session=mock_rw
         )
 
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(PersistenceError, match="update_hgnc_hseq_pointers"):
             repo.update_hgnc_hseq_pointers(
-                run_comment="test",
-                run_submitted=12345,
+                run_comment="import via hseqs_importer",
+                run_submitted=1234567890,
                 editor="genew",
+                genew4_lock=mock_lock,
             )
+
+        mock_lock.unlock_all.assert_called_once()
