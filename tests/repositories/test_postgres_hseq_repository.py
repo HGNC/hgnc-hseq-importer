@@ -308,6 +308,40 @@ class TestGetEnsemblCandidates:
             repo.get_ensembl_candidates()
 
 
+class TestHseqCandidateStatus:
+    """Test HseqCandidate status field defaults and overrides."""
+
+    def test_default_status_is_done(self) -> None:
+        candidate = HseqCandidate(
+            hgnc_id=1, source="pseudo", defline="d", sequence="A"
+        )
+        assert candidate.status == "done"
+
+    def test_status_can_be_overridden_to_bulk(self) -> None:
+        candidate = HseqCandidate(
+            hgnc_id=1, source="ccds", defline="d", sequence="A", status="bulk"
+        )
+        assert candidate.status == "bulk"
+
+    def test_pseudo_source_uses_default_status(self) -> None:
+        candidate = HseqCandidate(
+            hgnc_id=1, source="pseudo", defline="d", sequence="A"
+        )
+        assert candidate.status == "done"
+
+    def test_vega_source_uses_default_status(self) -> None:
+        candidate = HseqCandidate(
+            hgnc_id=1, source="vega", defline="d", sequence="A"
+        )
+        assert candidate.status == "done"
+
+    def test_ensembl_source_uses_default_status(self) -> None:
+        candidate = HseqCandidate(
+            hgnc_id=1, source="ensembl", defline="d", sequence="A"
+        )
+        assert candidate.status == "done"
+
+
 class TestBatchInsertHseq:
     """Test batch_insert_hseq with candidate records."""
 
@@ -364,6 +398,64 @@ class TestBatchInsertHseq:
 
         with pytest.raises(PersistenceError, match="batch insert"):
             repo.batch_insert_hseq(candidates)
+
+    def test_ccds_candidates_use_bulk_status(self) -> None:
+        mock_ro = MagicMock()
+        mock_rw = MagicMock()
+        added_records = []
+        mock_rw.add_all.side_effect = lambda records: added_records.extend(records)
+
+        candidates = [
+            HseqCandidate(
+                hgnc_id=1, source="ccds", defline="d1", sequence="A",
+                status="bulk",
+            ),
+            HseqCandidate(
+                hgnc_id=2, source="pseudo", defline="d2", sequence="B",
+            ),
+            HseqCandidate(
+                hgnc_id=3, source="vega", defline="d3", sequence="C",
+            ),
+            HseqCandidate(
+                hgnc_id=4, source="ensembl", defline="d4", sequence="D",
+            ),
+        ]
+
+        repo = PostgresHseqRepository(
+            readonly_session=mock_ro, readwrite_session=mock_rw
+        )
+        repo.batch_insert_hseq(candidates)
+
+        assert len(added_records) == 4
+        assert added_records[0].status == "bulk"
+        assert added_records[1].status == "done"
+        assert added_records[2].status == "done"
+        assert added_records[3].status == "done"
+
+    def test_non_ccds_candidates_use_done_status(self) -> None:
+        mock_ro = MagicMock()
+        mock_rw = MagicMock()
+        added_records = []
+        mock_rw.add_all.side_effect = lambda records: added_records.extend(records)
+
+        candidates = [
+            HseqCandidate(
+                hgnc_id=1, source="pseudo", defline="d1", sequence="A",
+            ),
+            HseqCandidate(
+                hgnc_id=2, source="vega", defline="d2", sequence="B",
+            ),
+            HseqCandidate(
+                hgnc_id=3, source="ensembl", defline="d3", sequence="C",
+            ),
+        ]
+
+        repo = PostgresHseqRepository(
+            readonly_session=mock_ro, readwrite_session=mock_rw
+        )
+        repo.batch_insert_hseq(candidates)
+
+        assert all(r.status == "done" for r in added_records)
 
 
 class TestUpdateHgncHseqPointers:

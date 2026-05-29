@@ -20,9 +20,12 @@ class HseqCandidate:
         source: The source name (pseudo, vega, ccds, ensembl).
         defline: The FASTA defline string.
         sequence: The nucleotide sequence.
+        status: The hseq status value. CCDS uses 'bulk', all other
+            sources use 'done'.
     """
 
     hgnc_id: int
     source: str
     defline: str
     sequence: str
+    status: str = "done"

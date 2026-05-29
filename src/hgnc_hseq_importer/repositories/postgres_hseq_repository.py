@@ -136,6 +136,7 @@ class PostgresHseqRepository(HseqRepository):
                         f"{row[1]} | C:{row[2]} | EG:{row[3]} | {row[4]} | HGNC:{row[0]}"
                     ),
                     sequence=row[5] or "",
+                    status="bulk",
                 )
                 for row in rows
             ]
@@ -186,7 +187,7 @@ class PostgresHseqRepository(HseqRepository):
                     editor="genew",
                     molecule="dna",
                     submitted=int(__import__("time").time()),
-                    status="done",
+                    status=c.status,
                     priority=100,
                     run_notes="search=hgnc_heavy, summ=50, align=30",
                     comment="import via hseqs_importer",
