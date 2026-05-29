@@ -177,20 +177,26 @@ class PostgresHseqRepository(HseqRepository):
                 f"Failed to query Ensembl candidates: {exc}"
             ) from exc
 
-    def batch_insert_hseq(self, candidates: list[HseqCandidate]) -> int:
+    def batch_insert_hseq(
+        self,
+        candidates: list[HseqCandidate],
+        run_comment: str = "import via hseqs_importer",
+        run_submitted: int | None = None,
+    ) -> int:
         if not candidates:
             return 0
         try:
+            submitted = run_submitted or int(__import__("time").time())
             records = [
                 orm.Hseq(
                     ext=c.source,
                     editor="genew",
                     molecule="dna",
-                    submitted=int(__import__("time").time()),
+                    submitted=submitted,
                     status=c.status,
                     priority=100,
                     run_notes="search=hgnc_heavy, summ=50, align=30",
-                    comment="import via hseqs_importer",
+                    comment=run_comment,
                     entry_class="archive",
                     is_new="TRUE",
                     defline=c.defline,

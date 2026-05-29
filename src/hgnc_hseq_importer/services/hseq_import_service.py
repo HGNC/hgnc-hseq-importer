@@ -88,15 +88,21 @@ class HseqImportService(Service):
     Args:
         repository: Repository for persisting sequences and updating pointers.
         logger: Logger for emitting structured metrics.
+        genew4_lock: Optional Genew4Lock instance for row-level locking
+            during pointer updates.
     """
+
+    _RUN_COMMENT = "import via hseqs_importer"
 
     def __init__(
         self,
         repository: HseqRepository,
         logger: logging.Logger,
+        genew4_lock: object | None = None,
     ) -> None:
         self._repository = repository
         self._logger = logger
+        self._genew4_lock = genew4_lock
 
     def run(self) -> None:
         """Execute the hseq import lifecycle (Service ABC contract).
@@ -124,6 +130,9 @@ class HseqImportService(Service):
             extra={"event": "import_start"},
         )
 
+        run_comment = self._RUN_COMMENT
+        run_submitted = int(time.time())
+
         start = time.monotonic()
         try:
             coordinator = HseqImportCoordinator(logger=self._logger)
@@ -137,12 +146,24 @@ class HseqImportService(Service):
             selected = coordinator.select_candidates(all_candidates)
 
             inserted = 0
+            pointers_updated = 0
             if selected:
-                inserted = self._repository.batch_insert_hseq(selected)
+                inserted = self._repository.batch_insert_hseq(
+                    selected,
+                    run_comment=run_comment,
+                    run_submitted=run_submitted,
+                )
+                pointers_updated = self._repository.update_hgnc_hseq_pointers(
+                    run_comment=run_comment,
+                    run_submitted=run_submitted,
+                    editor="genew",
+                    genew4_lock=self._genew4_lock,
+                )
 
             result = ImportResult(
                 records_parsed=len(all_candidates),
                 sequences_upserted=inserted,
+                pointers_updated=pointers_updated,
             )
         finally:
             elapsed = time.monotonic() - start
@@ -153,6 +174,7 @@ class HseqImportService(Service):
                 "event": "import_complete",
                 "records_parsed": result.records_parsed,
                 "sequences_upserted": result.sequences_upserted,
+                "pointers_updated": result.pointers_updated,
                 "duration_seconds": round(elapsed, 3),
             },
         )
